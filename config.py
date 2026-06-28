@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 UARB_URL = "https://uarb.novascotia.ca/fmi/webd/UARB15"
-MAX_DOCS = 10
+MAX_DOCS = int(os.getenv("MAX_DOCS", "10"))
 
 DOC_TYPES = [
     "Exhibits",
