@@ -14,11 +14,23 @@ user emails "Other Documents from M12205?"
                                        └──────────────────┘
 ```
 
-## Why Playwright?
+## Why Playwright? Why coordinate-based clicking?
 
-The UARB site runs FileMaker WebDirect (`/fmi/webd/` URL). It's a thick-client
-JS app with dynamic element IDs — plain `requests` / `BeautifulSoup` won't
-touch it. Scripted Playwright with text-based locators is the reliable choice.
+The UARB site runs **FileMaker WebDirect** (`/fmi/webd/UARB15`), a thick-client
+VAADIN framework app. Key constraints discovered through live DOM analysis:
+
+- Zero `<input>` elements — fields are `div.fm-textarea-prompt` VAADIN widgets
+- VAADIN re-renders the entire DOM after each keystroke; CSS-class locators go
+  stale immediately — **coordinate-based clicking** is the only stable approach
+- The "Preview" button triggers a browser navigation to a streaming PDF URL
+  (`/Streaming/Additional_1/<HASH>.pdf`) but does NOT fire a Playwright
+  `download` event and doesn't open a new tab
+- **Download strategy**: `page.route("**", handler)` intercepts the PDF
+  navigation, aborts it (keeping the browser on WebDirect), then downloads the
+  streaming URL directly via `page.request.get()` with session cookies
+- VAADIN replays the aborted streaming request on the next tab click; the
+  scraper uses a `seen_hashes` set to skip stale replays and pick the correct
+  new-document URL
 
 ## Setup
 
@@ -27,6 +39,8 @@ touch it. Scripted Playwright with text-based locators is the reliable choice.
 ```bash
 git clone <your-repo-url>
 cd senpilot-agent
+python -m venv .venv
+.venv\Scripts\activate   # Windows; or: source .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
 ```
@@ -47,53 +61,36 @@ playwright install chromium
 
 ```bash
 cp .env.example .env
-# edit .env — set HEADLESS=false while developing
+# edit .env — add HEADLESS=true for production
 ```
 
 ### 4. Authorise Gmail (one-time)
 
 ```bash
-python run.py --once
+.venv\Scripts\python run.py --once
 ```
 
-A browser window opens for OAuth consent. Click through, then `token.json`
-is written. Subsequent runs are headless.
+A browser window opens for OAuth consent. Click through; `token.json` is
+written. Subsequent runs reuse it automatically.
 
-### 5. Tune the Playwright selectors (the real work)
+### 5. Run
 
 ```bash
-# Watch the browser and record exact selectors
-HEADLESS=false python -c "
-from playwright.sync_api import sync_playwright
-with sync_playwright() as p:
-    b = p.chromium.launch(headless=False)
-    page = b.new_context().new_page()
-    page.goto('https://uarb.novascotia.ca/fmi/webd/UARB15')
-    input('Navigate through the site, then press Enter to close...')
-    b.close()
-"
+.venv\Scripts\python run.py           # poll loop — runs forever
+.venv\Scripts\python run.py --once    # process current unread inbox, then exit
 ```
 
-Or use codegen:
-```bash
-playwright codegen https://uarb.novascotia.ca/fmi/webd/UARB15
-```
+Send the agent an email like:
+> Can you pull Other Documents from M12205?
 
-Copy any generated selectors into `scraper.py` at the lines marked `# TUNE:`.
-
-### 6. Run
-
-```bash
-python run.py           # poll loop — runs forever
-python run.py --once    # process current unread inbox, then exit
-```
+The agent replies in-thread with a summary + ZIP attachment.
 
 ## File structure
 
 | File | Purpose |
 |------|---------|
 | `run.py` | Entrypoint — poll loop |
-| `agent.py` | Orchestration — tie all components together |
+| `agent.py` | Orchestration — parse → scrape → summarise → reply |
 | `request_parser.py` | Extract matter number + doc type from email text |
 | `scraper.py` | Playwright scraper for the UARB WebDirect site |
 | `summary.py` | Build the reply email body from scrape results |
@@ -102,8 +99,9 @@ python run.py --once    # process current unread inbox, then exit
 
 ## What I'd add with more time
 
-- Retry with exponential back-off for WebDirect timeouts
+- Scroll/paginate WebDirect's document list (currently downloads up to the first
+  page-full of Preview buttons; 9–10 visible rows)
+- Retry with exponential back-off for WebDirect session timeouts
 - Dedup incoming emails (hash `message-id`) so re-sends aren't processed twice
-- Preview-tab fallback: some WebDirect installs open files in a viewer; the
-  current fallback handles this but could be made more robust
-- Persist scrape results to SQLite for the searchable database layer
+- Extract descriptive file names (exhibit number, title) instead of hash names
+- Persist scrape results to SQLite for a searchable cache layer
