@@ -28,7 +28,7 @@ if hasattr(sys.stderr, "buffer"):
 
 import config
 
-LONG  = 60_000
+LONG  = 120_000
 MED   = 30_000
 SHORT = 8_000
 
@@ -311,8 +311,9 @@ def fetch_matter(matter: str, doc_type: str) -> MatterResult:
             _click_doc_tab(page, doc_type)
 
             # ── 4. Download up to MAX_DOCS via Preview ────────────────────────
-            n = min(config.MAX_DOCS, result.requested_total)
-            print(f"[scraper] downloading {n}/{result.requested_total} {doc_type}", flush=True)
+            visible = page.get_by_text(re.compile(r"^Preview$", re.IGNORECASE)).count()
+            n = min(config.MAX_DOCS, result.requested_total, visible)
+            print(f"[scraper] downloading {n}/{result.requested_total} {doc_type} ({visible} visible)", flush=True)
             seen_hashes: set = set()
             for i in range(n):
                 # VAADIN clears the doc list after each Preview click (even though
@@ -320,7 +321,11 @@ def fetch_matter(matter: str, doc_type: str) -> MatterResult:
                 # download to restore the full list, then click Preview[i].
                 # (For i=0 the tab was already clicked by _click_doc_tab above.)
                 if i > 0:
-                    _click_doc_tab(page, doc_type)
+                    try:
+                        _click_doc_tab(page, doc_type)
+                    except Exception as e:
+                        print(f"[scraper] [{i + 1}/{n}] tab click failed, stopping loop: {str(e)[:120]}", flush=True)
+                        break
                 dest = _download_doc_via_preview(page, i, f"{matter}_{i + 1}", seen_hashes)
                 if dest:
                     result.downloaded_files.append(dest)
@@ -328,13 +333,15 @@ def fetch_matter(matter: str, doc_type: str) -> MatterResult:
                 else:
                     print(f"[scraper] [{i + 1}/{n}] failed (skipping)", flush=True)
 
-            # ── 5. Zip ────────────────────────────────────────────────────────
-            _zip_files(result)
-
         except Exception as e:
             result.error = str(e)
-            print(f"[scraper] fatal: {e}", flush=True)
+            print(f"[scraper] fatal: {str(e).encode('ascii', errors='replace').decode()}", flush=True)
         finally:
+            # Zip whatever was downloaded — even if the loop crashed partway through
+            try:
+                _zip_files(result)
+            except Exception as ze:
+                print(f"[scraper] zip failed: {ze}", flush=True)
             ctx.close()
             browser.close()
     return result
