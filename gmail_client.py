@@ -2,7 +2,10 @@
 import base64
 import os
 from dataclasses import dataclass
-from email.message import EmailMessage
+from email import encoders as _encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 from typing import List, Optional
 
@@ -110,6 +113,9 @@ def list_unread(service, max_results: int = 10) -> List[IncomingEmail]:
     return emails
 
 
+_ATTACH_LIMIT_BYTES = 20 * 1024 * 1024  # 20 MB — Gmail API raw-message limit
+
+
 def send_reply(
     service,
     to_addr: str,
@@ -119,21 +125,42 @@ def send_reply(
     in_reply_to: str,
     attachment: Optional[Path] = None,
 ):
-    em = EmailMessage()
-    em["To"] = to_addr
-    em["Subject"] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
-    em.set_content(body)
-    if in_reply_to:
-        em["In-Reply-To"] = in_reply_to
-        em["References"] = in_reply_to
+    subj = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+
+    # Decide whether to include the attachment
+    attach_data: Optional[bytes] = None
+    attach_name: Optional[str] = None
     if attachment and attachment.exists():
-        em.add_attachment(
-            attachment.read_bytes(),
-            maintype="application",
-            subtype="zip",
-            filename=attachment.name,
-        )
-    raw = base64.urlsafe_b64encode(em.as_bytes()).decode()
+        size = attachment.stat().st_size
+        if size <= _ATTACH_LIMIT_BYTES:
+            attach_data = attachment.read_bytes()
+            attach_name = attachment.name
+        else:
+            # Too large for Gmail API raw send — note it in the body
+            body += (
+                f"\n\n(The ZIP file was {size // (1024*1024)} MB — too large to "
+                f"attach directly. Please ask me to send individual documents.)"
+            )
+
+    # Build message with MIMEMultipart (reliable with the Gmail API)
+    if attach_data:
+        msg = MIMEMultipart()
+        msg.attach(MIMEText(body, "plain"))
+        part = MIMEBase("application", "zip")
+        part.set_payload(attach_data)
+        _encoders.encode_base64(part)
+        part.add_header("Content-Disposition", f'attachment; filename="{attach_name}"')
+        msg.attach(part)
+    else:
+        msg = MIMEText(body, "plain")
+
+    msg["To"] = to_addr
+    msg["Subject"] = subj
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
+
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     service.users().messages().send(
         userId="me", body={"raw": raw, "threadId": thread_id}
     ).execute()
