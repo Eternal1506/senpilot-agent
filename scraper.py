@@ -263,16 +263,24 @@ def _download_doc_via_preview(
         print(f"[scraper] doc {btn_index + 1}: {pdf_url[:80]}...", flush=True)
 
         # Download via page.request (uses the browser session / cookies)
+        # Retry up to 3 times — UARB sometimes stalls on body after sending 200 headers.
         fname = pdf_url.split("/")[-1].split("?")[0] or f"{dest_prefix}.pdf"
         dest = _unique_path(config.DOWNLOAD_DIR, fname)
-        try:
-            resp = page.request.get(pdf_url, timeout=120_000)
-            if resp.ok:
-                dest.write_bytes(resp.body())
-                return dest
-            print(f"[scraper] request returned HTTP {resp.status}", flush=True)
-        except Exception as e:
-            print(f"[scraper] download failed: {str(e).encode('ascii', errors='replace').decode()}", flush=True)
+        for attempt in range(3):
+            try:
+                resp = page.request.get(pdf_url, timeout=120_000)
+                if resp.ok:
+                    dest.write_bytes(resp.body())
+                    return dest
+                print(f"[scraper] request returned HTTP {resp.status}", flush=True)
+                break  # non-timeout failure — no point retrying
+            except Exception as e:
+                err = str(e).encode("ascii", errors="replace").decode()
+                if attempt < 2:
+                    print(f"[scraper] attempt {attempt + 1} failed, retrying in 5 s: {err[:100]}", flush=True)
+                    page.wait_for_timeout(5_000)
+                else:
+                    print(f"[scraper] download failed: {err}", flush=True)
         return None
 
     finally:
